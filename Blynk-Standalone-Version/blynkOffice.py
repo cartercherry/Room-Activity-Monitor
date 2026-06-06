@@ -4,6 +4,14 @@ import ntptime
 import urequests
 from machine import Pin
 from secrets import WIFI_PASS, BLYNK_TOKEN
+from umqtt.simple import MQTTClient  # Add this to your imports
+
+# ... [Your existing WIFI and BLYNK config] ...
+
+# --- Local MQTT Configuration ---
+MQTT_BROKER = "192.168.1.199"       # Your Raspberry Pi 5 IP
+MQTT_CLIENT_ID = "sensor_office"
+MQTT_TOPIC = b"home/office/occupancy"  # The 'b' is required to format as bytes
 
 # --- Configuration ---
 WIFI_SSID = "dd-wrt"
@@ -15,6 +23,10 @@ SENSOR_PIN = 22  # XIAO ESP32-C6 pin D4
 # Blynk Virtual Pins (Set for Room 2)
 VPIN_STATUS = "v1"
 VPIN_DURATION = "v2"
+
+ROOM_NAME = "Office"          # Change to "Living Room" for the other script
+TIMEOUT_MINUTES = 5           # The threshold for the alert
+EVENT_CODE = "timeout_alert"  # Must match the code in the Blynk Web Console exactly
 
 # --- Network Setup ---
 wlan = network.WLAN(network.STA_IF)
@@ -32,6 +44,16 @@ try:
     print("Time synchronized successfully.")
 except Exception as e:
     print("Failed to sync time:", e)
+    
+    
+# --- Connect to MQTT Broker ---
+try:
+    mqtt_client = MQTTClient(MQTT_CLIENT_ID, MQTT_BROKER)
+    mqtt_client.connect()
+    print("Connected to Local Mosquitto Broker!")
+except Exception as e:
+    print("Failed to connect to MQTT:", e)
+
 
 # --- Functions ---
 def get_local_timestamp():
@@ -68,6 +90,24 @@ def send_to_blynk(status_text, duration_text):
     except Exception as e:
         print("Network Error:", e)
 
+def trigger_timeout_alert():
+    # Create a custom message and encode the spaces for the URL
+    message = f"Alert! The {ROOM_NAME} has been occupied for over {TIMEOUT_MINUTES} minutes."
+    safe_message = message.replace(" ", "%20")
+    
+    # Use the logEvent endpoint
+    url = f"https://blynk.cloud/external/api/logEvent?token={BLYNK_TOKEN}&code={EVENT_CODE}&description={safe_message}"
+    
+    try:
+        response = urequests.get(url)
+        if response.status_code == 200:
+            print(f"*** NOTIFICATION SENT: {ROOM_NAME} Timeout! ***")
+        else:
+            print(f"Failed to send alert. Code: {response.status_code}")
+        response.close()
+    except Exception as e:
+        print("Network Error sending alert:", e)
+
 # --- Main Monitoring Loop ---
 sensor = Pin(SENSOR_PIN, Pin.IN)
 is_occupied = False
@@ -75,7 +115,10 @@ occupancy_start_time = 0
 last_minute_logged = -1
 arrival_time_str = ""
 
-print("System Ready. Monitoring Room 2...")
+# NEW: Flag to prevent notification spam
+alert_sent = False 
+
+print(f"System Ready. Monitoring {ROOM_NAME}...")
 
 while True:
     current_state = sensor.value()
@@ -85,12 +128,20 @@ while True:
         is_occupied = True
         occupancy_start_time = time.time()
         last_minute_logged = 0
+        alert_sent = False  # RESET the flag when someone enters
         
         arrival_time_str = get_local_timestamp()
         
         status = "Occupied"
         duration = f"Just arrived ({arrival_time_str})"
         send_to_blynk(status, duration)
+        
+        # NEW: Broadcast to local homelab
+        try:
+            mqtt_client.publish(MQTT_TOPIC, b"1")
+        except:
+            pass
+        
         
     # State Change: Occupied -> Empty
     elif current_state == 0 and is_occupied:
@@ -101,6 +152,12 @@ while True:
         status = "Empty"
         duration = f"Left at {departure_time_str}"
         send_to_blynk(status, duration)
+        
+        # NEW: Broadcast to local homelab
+        try:
+            mqtt_client.publish(MQTT_TOPIC, b"0")
+        except:
+            pass
         
     # Ongoing Occupancy: Update every minute
     elif is_occupied:
@@ -113,5 +170,10 @@ while True:
             status = "Occupied"
             duration = f"For {elapsed_minutes} mins ({arrival_time_str})"
             send_to_blynk(status, duration)
+            
+            # NEW: Check if we have crossed the timeout threshold
+            if elapsed_minutes >= TIMEOUT_MINUTES and not alert_sent:
+                trigger_timeout_alert()
+                alert_sent = True # Set the flag so it only alerts once per visit!
             
     time.sleep(1)

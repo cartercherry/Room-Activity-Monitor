@@ -4,6 +4,14 @@ import ntptime
 import urequests
 from machine import Pin
 from secrets import WIFI_PASS, BLYNK_TOKEN
+from umqtt.simple import MQTTClient  # Add this to your imports
+
+# ... [Your existing WIFI and BLYNK config] ...
+
+# --- Local MQTT Configuration ---
+MQTT_BROKER = "192.168.1.199"       # Your Raspberry Pi 5 IP
+MQTT_CLIENT_ID = "sensor_livingroom"
+MQTT_TOPIC = b"home/livingroom/occupancy"  # The 'b' is required to format as bytes
 
 # --- Configuration ---
 WIFI_SSID = "TP-Link_A7"
@@ -16,7 +24,7 @@ SENSOR_PIN = 22  # XIAO ESP32-C6 pin D4
 VPIN_STATUS = "v3"
 VPIN_DURATION = "v4"
 
-ROOM_NAME = "Living Roomn"          # Change to "Living Room" for the other script
+ROOM_NAME = "Living Room"          # Change to "Living Room" for the other script
 TIMEOUT_MINUTES = 5           # The threshold for the alert
 EVENT_CODE = "timeout_alert"  # Must match the code in the Blynk Web Console exactly
 
@@ -36,6 +44,16 @@ try:
     print("Time synchronized successfully.")
 except Exception as e:
     print("Failed to sync time:", e)
+    
+    
+# --- Connect to MQTT Broker ---
+try:
+    mqtt_client = MQTTClient(MQTT_CLIENT_ID, MQTT_BROKER)
+    mqtt_client.connect()
+    print("Connected to Local Mosquitto Broker!")
+except Exception as e:
+    print("Failed to connect to MQTT:", e)
+
 
 # --- Functions ---
 def get_local_timestamp():
@@ -118,6 +136,13 @@ while True:
         duration = f"Just arrived ({arrival_time_str})"
         send_to_blynk(status, duration)
         
+        # NEW: Broadcast to local homelab
+        try:
+            mqtt_client.publish(MQTT_TOPIC, b"1")
+        except:
+            pass
+        
+        
     # State Change: Occupied -> Empty
     elif current_state == 0 and is_occupied:
         is_occupied = False
@@ -127,6 +152,12 @@ while True:
         status = "Empty"
         duration = f"Left at {departure_time_str}"
         send_to_blynk(status, duration)
+        
+        # NEW: Broadcast to local homelab
+        try:
+            mqtt_client.publish(MQTT_TOPIC, b"0")
+        except:
+            pass
         
     # Ongoing Occupancy: Update every minute
     elif is_occupied:
